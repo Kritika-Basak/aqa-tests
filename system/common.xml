@@ -29,7 +29,10 @@
 	<condition property="openj9_systemtest_branch" value="${env.OPENJ9_SYSTEMTEST_BRANCH}" else="master">
 		<isset property="env.OPENJ9_SYSTEMTEST_BRANCH"/>
 	</condition>
-
+	
+	<property name="stf_repo" value="https://github.com/Kritika-Basak/STF.git"/>
+	<property name="stf_branch" value="JLMTestFix"/>
+	
 	<condition property="stf_repo" value="${env.STF_REPO}" else="${git-prefix}://github.com/adoptium/STF.git">
 		<isset property="env.STF_REPO"/>
 	</condition>
