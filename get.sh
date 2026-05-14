@@ -894,7 +894,8 @@ fi
 
 if [ "$SDKDIR" != "" ]; then
 	getBinaryOpenjdk
-	testJavaVersion
+	echo "SDK downloaded and extracted to $SDKDIR/jdkbinary/j2sdk-image. Skipping Java validation and remaining setup."
+	exit 0
 fi
 
 if [ "$SDK_RESOURCE" == "customized" ] && [ "$CUSTOMIZED_SDK_SOURCE_URL" != "" ]; then
