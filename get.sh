@@ -793,7 +793,13 @@ getVendorTestMaterial() {
 
 	done
 }
-
+#clone the jck_repo
+getJCKRepo() {
+    if [ "$JCK_GIT_REPO" != "" ]; then
+        echo "Cloning JCK repo..."
+        git clone -q --depth 1 -b "$JCK_GIT_BRANCH" "$JCK_GIT_REPO" jck8d
+    fi
+}
 testJavaVersion()
 {
 	# use environment variable TEST_JDK_HOME to run java -version
@@ -916,3 +922,4 @@ fi
 if [ "$VENDOR_REPOS" != "" ]; then
 	getVendorTestMaterial
 fi
+getJCKRepo
