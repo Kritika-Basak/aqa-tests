@@ -109,6 +109,15 @@ def setupEnv() {
 	env.TKG_ITERATIONS = params.TKG_ITERATIONS ? "${params.TKG_ITERATIONS}".toInteger() : 1
 	env.EXIT_FAILURE = params.EXIT_FAILURE ? params.EXIT_FAILURE : false
 	env.EXIT_SUCCESS = params.EXIT_SUCCESS ? params.EXIT_SUCCESS : false
+
+	// Initialize iteration result accumulators for multi-iteration test runs
+	env.ITER_COUNT = '0'
+	env.ITER_TOTAL = '0'
+	env.ITER_EXECUTED = '0'
+	env.ITER_PASSED = '0'
+	env.ITER_FAILED = '0'
+	env.ITER_DISABLED = '0'
+	env.ITER_SKIPPED = '0'
 	NUM_MACHINES = params.NUM_MACHINES ? params.NUM_MACHINES.toInteger() : 1
 	if (CLOUD_PROVIDER == 'azure') {
 		// Needs to be inside the workspace as the docker container won't have permissions to write to higher level directories
@@ -561,6 +570,7 @@ def setup() {
 		VENDOR_TEST_BRANCHES = (params.VENDOR_TEST_BRANCHES) ? "--vendor_branches \"${params.VENDOR_TEST_BRANCHES}\"" : ""
 		VENDOR_TEST_DIRS = (params.VENDOR_TEST_DIRS) ? "--vendor_dirs \"${params.VENDOR_TEST_DIRS}\"" : ""
 		VENDOR_TEST_SHAS = (params.VENDOR_TEST_SHAS) ? "--vendor_shas \"${params.VENDOR_TEST_SHAS}\"" : ""
+
 		env.IS_SVT_TESTREPO = (params.VENDOR_TEST_REPOS && params.VENDOR_TEST_REPOS.contains('SVTTestRepo')) ? true : false
 		echo "IS_SVT_TESTREPO is set to ${env.IS_SVT_TESTREPO}"
 
@@ -572,7 +582,8 @@ def setup() {
 		ADDITIONAL_ARTIFACTS_REQUIRED_OPTION = (params.ADDITIONAL_ARTIFACTS_REQUIRED) ? "--additional_artifacts_required ${params.ADDITIONAL_ARTIFACTS_REQUIRED}" : ""
 
 		CURL_OPTS = (params.CURL_OPTS) ? "--curl_opts \"${params.CURL_OPTS}\"" : ""
-		GET_SH_CMD = "./get.sh -s `pwd`/.. -p $PLATFORM -r ${SDK_RESOURCE} ${JDK_VERSION_OPTION} ${JDK_IMPL_OPTION} ${CUSTOMIZED_SDK_URL_OPTION} ${CLONE_OPENJ9_OPTION} ${OPENJ9_REPO_OPTION} ${OPENJ9_BRANCH_OPTION} ${OPENJ9_SHA_OPTION} ${TKG_REPO_OPTION} ${TKG_BRANCH_OPTION} ${VENDOR_TEST_REPOS} ${VENDOR_TEST_BRANCHES} ${VENDOR_TEST_DIRS} ${VENDOR_TEST_SHAS} ${TEST_IMAGES_REQUIRED} ${DEBUG_IMAGES_REQUIRED} ${CODE_COVERAGE_OPTION} ${CURL_OPTS} ${ADDITIONAL_ARTIFACTS_REQUIRED_OPTION}"
+		SETUP_JCK_RUN_OPTION = (params.SETUP_JCK_RUN) ? "--setup_jck_run true" : ""
+		GET_SH_CMD = "./get.sh -s `pwd`/.. -p $PLATFORM -r ${SDK_RESOURCE} ${JDK_VERSION_OPTION} ${JDK_IMPL_OPTION} ${CUSTOMIZED_SDK_URL_OPTION} ${CLONE_OPENJ9_OPTION} ${OPENJ9_REPO_OPTION} ${OPENJ9_BRANCH_OPTION} ${OPENJ9_SHA_OPTION} ${TKG_REPO_OPTION} ${TKG_BRANCH_OPTION} ${VENDOR_TEST_REPOS} ${VENDOR_TEST_BRANCHES} ${VENDOR_TEST_DIRS} ${VENDOR_TEST_SHAS} ${TEST_IMAGES_REQUIRED} ${DEBUG_IMAGES_REQUIRED} ${CODE_COVERAGE_OPTION} ${CURL_OPTS} ${ADDITIONAL_ARTIFACTS_REQUIRED_OPTION} ${SETUP_JCK_RUN_OPTION}"
 		RESOLVED_MAKE = "if [ `uname` = AIX ] || [ `uname` = SunOS ] || [ `uname` = *BSD ]; then MAKE=gmake; else MAKE=make; fi"
 		dir( WORKSPACE) {
 			// use sshagent with Jenkins credentials ID for all platforms except zOS
@@ -665,7 +676,7 @@ def get_sources() {
 			sh "$GET_SH_CMD"
 		}
 	}
-	if (params.SETUP_JCK_RUN && env.BUILD_LIST.contains('jck') && SDK_RESOURCE.contains('customized')) {
+	if (params.SETUP_JCK_RUN && env.BUILD_LIST.contains('jck')) {
 		setup_jck_interactives()
 	}
 }
@@ -851,14 +862,30 @@ def runTest( ) {
 						}
 					}
 				}
-			} else if (env.SPEC.startsWith('zos')) { 
+			} else if (env.SPEC.startsWith('zos')) {
 				makeTest("${RUNTEST_CMD}")
 			} else {
 				sshagent (credentials: ["$params.SSH_AGENT_CREDENTIAL"], ignoreMissing: true) {
 					makeTest("${RUNTEST_CMD}")
 				}
 			}
+
+			// Accumulate results after each iteration
+			def resultSum = [:]
+			def matcher = manager.getLogMatcher(".*(TOTAL: \\d+)\\s*(EXECUTED: \\d+)\\s*(PASSED: \\d+)\\s*(FAILED: \\d+)\\s*(DISABLED: \\d+)?\\s*(SKIPPED: \\d+)\\s*\$")
+			if (matcher?.matches()) {
+				for (int j = 1; j <= matcher.groupCount(); j++) {
+					if (matcher.group(j) != null) {
+						def matchVals = matcher.group(j).split(": ")
+						resultSum[matchVals[0]] = matchVals[1] as int
+					}
+				}
+				checkTestResults(resultSum)
+			}
 		}
+
+		// Write aggregated summary after all iterations complete
+		writeSummary()
 
 		if (params.CODE_COVERAGE) {
 			echo 'Generating Code Coverage Reports...'
@@ -870,57 +897,113 @@ def runTest( ) {
 			}
 		}
 
-                if (env.BUILD_LIST.startsWith('perf')) {
-                    checkDacapoH2Metric()
-                }
-
-		def resultSum = [:]
-		def matcher = manager.getLogMatcher(".*(TOTAL: \\d+)\\s*(EXECUTED: \\d+)\\s*(PASSED: \\d+)\\s*(FAILED: \\d+)\\s*(DISABLED: \\d+)?\\s*(SKIPPED: \\d+)\\s*\$")
-		if (matcher?.matches()) {
-			for (int i = 1; i <= matcher.groupCount(); i++) {
-				if (matcher.group(i) != null) {
-					def matchVals = matcher.group(i).split(": ")
-					resultSum[matchVals[0]] = matchVals[1] as int
-				}
-			}
-			checkTestResults(resultSum)
-		} else {
+		if (env.BUILD_LIST.startsWith('perf')) {
+			checkDacapoH2Metric()
+		}
+		// Check if any iterations ran and accumulated results
+		if (env.ITER_COUNT.toInteger() == 0) {
 			env.jobStatus = 'FAILURE'
 			echo 'Could not find test result, set build result to FAILURE.'
-			def summary = manager.createSummary("error.svg")
-			summary.appendText("TEST BUILD FAILURE!", false)
+			def summary = createBadgeSummary("error.svg")
+			appendSummaryText(summary,"TEST BUILD FAILURE!")
+		} 
+	}
+}
+
+def createBadgeSummary(iconName) {
+	// Try new method first (badge plugin v3.583+), fallback to deprecated method for older versions
+	def summary = null
+	try {
+		summary = manager.addSummary(iconName)
+	} catch (Exception e) {
+		echo "addSummary failed, trying deprecated createSummary method: ${e.message}"
+		try {
+			summary = manager.createSummary(iconName)
+		} catch (Exception e2) {
+			echo "Both addSummary and createSummary failed: ${e2.message}"
+			throw e2
 		}
+	}
+	return summary
+}
+
+def appendSummaryText(summary, text) {
+	try {
+		def currentText = summary.getText() ?: ""
+		summary.setText(currentText + text)
+	} catch (Exception e) {
+		echo "setText failed, trying deprecated appendText: ${e.message}"
+		summary.appendText(text, false)
 	}
 }
 
 def checkTestResults(results) {
-	if (results.isEmpty()) {
+	if (results.isEmpty()) {	
 		return
 	}
 
-	def summary = null
+	// Accumulate results across iterations (see issue #978)
+	env.ITER_COUNT = (env.ITER_COUNT.toInteger() + 1).toString()
+	env.ITER_TOTAL = (env.ITER_TOTAL.toInteger() + (results["TOTAL"] ?: 0)).toString()
+	env.ITER_EXECUTED = (env.ITER_EXECUTED.toInteger() + (results["EXECUTED"] ?: 0)).toString()
+	env.ITER_PASSED = (env.ITER_PASSED.toInteger() + (results["PASSED"] ?: 0)).toString()
+	env.ITER_FAILED = (env.ITER_FAILED.toInteger() + (results["FAILED"] ?: 0)).toString()
+	env.ITER_DISABLED = (env.ITER_DISABLED.toInteger() + (results["DISABLED"] ?: 0)).toString()
+	env.ITER_SKIPPED = (env.ITER_SKIPPED.toInteger() + (results["SKIPPED"] ?: 0)).toString()
 
 	if (results["TOTAL"] == 0) {
 		env.jobStatus = 'FAILURE'
 		echo 'No test ran, current build status is FAILURE.'
-		summary = manager.createSummary("folder-delete.svg")
-		summary.appendText("NO TEST FOUND!", false)
+		summary = createBadgeSummary("folder-delete.svg")
+		appendSummaryText(summary, "NO TEST FOUND!")
 		return
 	}
 
 	if (results["FAILED"] != 0) {
 		env.jobStatus = 'UNSTABLE'
 		echo 'There were test failures, current build status is UNSTABLE.'
-		summary = manager.createSummary("warning.svg")
-	} else {
-		summary = manager.createSummary("accept.svg")
+	}
+	
+	// Summary writing is deferred to writeSummary() after all iterations complete
+}
+
+def writeSummary() {
+	def iterCount = env.ITER_COUNT.toInteger()
+
+	// If no iterations ran, nothing to summarize
+	if (iterCount == 0) {
+		return
 	}
 
-	summary.appendText("TEST TARGETS SUMMARY:<ul>", false)
-	results.each {
-		summary.appendText("<li><b>$it.key</b> : $it.value</li>", false)
+	def totalTests = env.ITER_TOTAL.toInteger()
+	def failedTests = env.ITER_FAILED.toInteger()
+
+	// Handle case where no tests were found
+	if (totalTests == 0) {
+		def summary = createBadgeSummary("folder-delete.svg")
+		appendSummaryText(summary,"NO TEST FOUND!")
+		return
 	}
-	summary.appendText("</ul>", false)
+
+	// Choose icon based on test results
+	def svg = failedTests != 0 ? "warning.svg" : "accept.svg"
+	def summary = createBadgeSummary(svg)
+
+	// Add iteration count to header if multiple iterations ran
+	def header = iterCount > 1
+		? "TEST TARGETS SUMMARY (${iterCount} iterations):"
+		: "TEST TARGETS SUMMARY:"
+
+	appendSummaryText(summary,"${header}<ul>")
+	appendSummaryText(summary,"<li><b>TOTAL</b> : ${env.ITER_TOTAL}</li>")
+	appendSummaryText(summary,"<li><b>EXECUTED</b> : ${env.ITER_EXECUTED}</li>")
+	appendSummaryText(summary,"<li><b>PASSED</b> : ${env.ITER_PASSED}</li>")
+	appendSummaryText(summary,"<li><b>FAILED</b> : ${env.ITER_FAILED}</li>")
+	if (env.ITER_DISABLED.toInteger() > 0) {
+		appendSummaryText(summary,"<li><b>DISABLED</b> : ${env.ITER_DISABLED}</li>")
+	}
+	appendSummaryText(summary,"<li><b>SKIPPED</b> : ${env.ITER_SKIPPED}</li>")
+	appendSummaryText(summary,"</ul>")
 }
 
 def post(output_name) {
@@ -1035,7 +1118,7 @@ def post(output_name) {
 				uploadToArtifactory(pattern)
 			}
 		}
-		
+
 		int rerunIterations = params.RERUN_ITERATIONS ? params.RERUN_ITERATIONS.toInteger() : 0
 		if (JOB_NAME.contains("_rerun") || JOB_NAME.contains("_testList_") || JOB_NAME.contains("_iteration_")) {
 			addFailedTestsGrinderLink()
@@ -1045,7 +1128,7 @@ def post(output_name) {
 			} else {
 				addFailedTestsGrinderLink()
 			}
-		} 
+		}
 
 		try {
 			junit skipMarkingBuildUnstable: true, allowEmptyResults: true, keepLongStdio: true, testResults: '**/work/**/*.jtr.xml, **/result/**/*.jtr.xml, **/junitreports/**/*.xml, **/external_test_reports/**/*.xml'
@@ -1621,7 +1704,7 @@ def triggerRerunJob (String originalStatus, Map rerunTestJobParams = null) {
 					def rerunResults = archiveChildJobTap(childJobs, originalStatus)
 					if (env.JDK_IMPL == "openj9" || env.JDK_IMPL == "ibm") {
 						currentBuild.result = originalStatus
-					} else if ( originalStatus == 'ABORTED') { 
+					} else if ( originalStatus == 'ABORTED') {
 						// Set job status to the worst result among its parallel branches including rerun branch.
 						currentBuild.result = originalStatus
 					} else {
@@ -1677,7 +1760,7 @@ def archiveChildJobTap(childJobs, originalStatus = 'SUCCESS') {
 					def childResult = cjob.getCurrentResult()
 					echo "${name} #${buildId} completed with status ${childResult}"
 					// track FAILURE job childTestJobParams if it's rerun stage
-					if ( originalStatus == "SUCCESS" && childResult == "FAILURE" ) { 
+					if ( originalStatus == "SUCCESS" && childResult == "FAILURE" ) {
 						childTestJobParams << parallelTestParams.findAll {it.key == name}
 					}
 					if (isWorseThan( childResult, currentStatus)) {
@@ -1760,8 +1843,8 @@ def runParallelTests() {
 		stage ("Parallel Tests") {
 			def childJobs = parallel parallel_tests
 			// There are cases env.PARALLEL != "None", but job is non parallel if number list is 1
-			if ( !childJobs.isEmpty() ) { 
-				parallelResults = archiveChildJobTap(childJobs) 
+			if ( !childJobs.isEmpty() ) {
+				parallelResults = archiveChildJobTap(childJobs)
 			}
 		}
 	}
@@ -1817,10 +1900,10 @@ def forceCleanWS() {
 
 def checkDacapoH2Metric() {
         def regex = ".*=====\\sDaCapo.*?h2\\sPASSED\\sin\\s(\\d*\\.?\\d*)\\smsec\\s=====\\s*\$"
-        def matcher = manager.getLogMatcher(regex)  
+        def matcher = manager.getLogMatcher(regex)
 
         if (matcher?.matches()) {
-                def runtime = matcher.group(1) 
+                def runtime = matcher.group(1)
                 archiveDacapoH2Metric(runtime)
                 println("DaCapo-h2 metric found and archived")
         } else {
@@ -1831,11 +1914,11 @@ def checkDacapoH2Metric() {
 def archiveDacapoH2Metric(runtime) {
         def fileName = "${env.JOB_NAME}_${env.BUILD_NUMBER}.json"
         def jsonData = [
-                "benchmark": "dacapo-h2", 
+                "benchmark": "dacapo-h2",
                         "metrics": [
                                 "dacapo-h2": [
                                         ["value": runtime],
-                                        ["higherbetter": true], 
+                                        ["higherbetter": true],
                                         ["units": "msec"]
                                 ]
                         ]
